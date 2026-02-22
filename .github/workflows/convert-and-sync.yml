@@ -1,6 +1,6 @@
 name: Sync CNB PDF to 123Pan
 
-于:
+on:
   schedule:
     - cron: '0 */6 * * *'  # 每6小时检查
   workflow_dispatch:       # 手动触发
@@ -47,19 +47,6 @@ jobs:
     # 5. 上传并管理版本（保留最近2个，永不覆盖）
     - name: Upload to 123Pan (Versioned)
       run: |
-        # 安装和配置 rclone
-        curl https://rclone.org/install.sh | sudo bash
-        mkdir -p ~/.config/rclone
-        OBSCURED_PASS=$(rclone obscure "${{ secrets.WEBDAV_PASS }}")
-        cat > ~/.config/rclone/rclone.conf << EOF
-        [123pan]
-        type = webdav
-        url = ${{ secrets.WEBDAV_URL }}
-        vendor = other
-        user = ${{ secrets.WEBDAV_USER }}
-        pass = $OBSCURED_PASS
-        EOF
-        
         REMOTE_DIR="123pan:/Chemistry-Notes"
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         VERSIONED_NAME="chemistry-notes-${TIMESTAMP}.zip"
@@ -74,7 +61,7 @@ jobs:
         fi
         
         echo "Step 2: Updating latest link..."
-        # 删除旧的 latest，复制新的（原子操作）
+        # 删除旧的 latest，复制新的
         rclone delete "$REMOTE_DIR/chemistry-notes-latest.zip" 2>/dev/null || true
         rclone copy "$REMOTE_DIR/$VERSIONED_NAME" "$REMOTE_DIR/chemistry-notes-latest.zip"
         

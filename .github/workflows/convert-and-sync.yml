@@ -1,191 +1,141 @@
-name: Auto Sync Upstream & Convert to PDF
+name: Auto Sync Upstream & Backup PDF to 123Pan
 
 on:
-  # 每6小时检查一次上游更新（可调整）
   schedule:
-    - cron: '0 */6 * * *'
-  # 支持手动触发
-  workflow_dispatch:
-  # 推送时触发（自己修改时）
+    - cron: '0 */6 * * *'  # 每6小时检查一次
+  workflow_dispatch:       # 手动触发
   push:
     branches: [main, master]
 
 jobs:
-  sync-and-build:
+  sync-and-backup:
     runs-on: ubuntu-latest
     
     steps:
-    # 1. 检出你的 Fork（带完整历史，用于后续推送）
+    # 1. 检出你的 Fork
     - name: Checkout your fork
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    # 2. 配置 Git 身份
+    # 2. 配置 Git
     - name: Configure Git
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-    # 3. 添加上游仓库并同步（关键步骤）
+    # 3. 同步上游代码（保留代码最新）
     - name: Sync with upstream
       id: sync
       run: |
-        # 添加上游远程
         git remote add upstream ${{ secrets.UPSTREAM_URL }} 2>/dev/null || true
-        
-        # 获取上游更新
         git fetch upstream
         
-        # 获取当前分支名（main 或 master）
         CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
         echo "Current branch: $CURRENT_BRANCH"
         echo "branch=$CURRENT_BRANCH" >> $GITHUB_OUTPUT
         
-        # 检查上游是否有更新
         UPSTREAM_SHA=$(git rev-parse upstream/$CURRENT_BRANCH)
         LOCAL_SHA=$(git rev-parse origin/$CURRENT_BRANCH)
         
         if [ "$UPSTREAM_SHA" = "$LOCAL_SHA" ]; then
-          echo "No updates from upstream. Skipping..."
+          echo "No updates from upstream."
           echo "has_update=false" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-        
-        echo "Upstream has new commits: $UPSTREAM_SHA"
-        echo "has_update=true" >> $GITHUB_OUTPUT
-        
-        # 合并上游更改（使用 --allow-unrelated-histories 以防万一）
-        git merge upstream/$CURRENT_BRANCH --no-edit --allow-unrelated-histories || {
-          echo "Merge conflict detected. Trying rebase..."
-          git reset --hard origin/$CURRENT_BRANCH
-          git rebase upstream/$CURRENT_BRANCH || {
-            echo "Rebase failed. Manual intervention needed."
-            exit 1
+        else
+          echo "Upstream has new commits."
+          echo "has_update=true" >> $GITHUB_OUTPUT
+          git merge upstream/$CURRENT_BRANCH --no-edit --allow-unrelated-histories || {
+            git reset --hard origin/$CURRENT_BRANCH
+            git rebase upstream/$CURRENT_BRANCH || exit 1
           }
-        }
-        
-        # 推送到你的 Fork
-        git push origin $CURRENT_BRANCH
+          git push origin $CURRENT_BRANCH
+        fi
 
-    # 4. 如果上游有更新（或手动触发），继续执行转换
-    - name: Check if should continue
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
-      run: echo "Proceeding with conversion..."
-
-    # 5. 安装依赖（Pandoc + LaTeX）
-    - name: Setup Pandoc
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
-      uses: r-lib/actions/setup-pandoc@v2
-      
-    - name: Install TeX Live
+    # 4. 从 CNB 下载原仓库已生成好的 PDF（关键改动：替换 Pandoc 转换）
+    - name: Download PDFs from CNB
       if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          texlive-xetex \
-          texlive-latex-extra \
-          texlive-fonts-recommended \
-          texlive-lang-chinese \
-          fonts-noto-cjk
-
-    # 6. 批量转换 MD → PDF
-    - name: Convert Markdown to PDF
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
-      run: |
-        mkdir -p output
+        mkdir -p pdf-download
         
-        # 查找所有 MD 文件（排除 node_modules 和 .github）
-        find . -name "*.md" -type f \
-          ! -path "./.github/*" \
-          ! -path "./node_modules/*" \
-          ! -path "./.git/*" | while read file; do
-          
-          # 保持目录结构
-          rel_path=$(dirname "$file" | sed 's|^\./||')
-          filename=$(basename "$file" .md)
-          
-          mkdir -p "output/$rel_path"
-          
-          echo "Converting: $file → output/$rel_path/$filename.pdf"
-          
-          pandoc "$file" \
-            --pdf-engine=xelatex \
-            -V CJKmainfont="Noto Sans CJK SC" \
-            -V geometry:margin=2.5cm \
-            -V colorlinks=true \
-            -o "output/$rel_path/$filename.pdf" || echo "Failed: $file"
-        done
+        # 方式1：直接下载 ZIP（推荐，无需 token，如果公开）
+        curl -L "https://cnb.cool/Seeridia/Chemistry-Note-File/-/archive/main.zip" -o pdfs.zip && \
+        unzip -q pdfs.zip -d pdf-download && \
+        mv pdf-download/Chemistry-Note-File-main/* pdf-download/ 2>/dev/null || true
         
-        # 统计生成的文件
-        echo "Generated files:"
-        find output -name "*.pdf" | wc -l
+        # 如果上述方式失败（私有仓库），使用 git clone（需要 CNB_TOKEN）
+        # git clone --depth 1 https://cnb:${{ secrets.CNB_TOKEN }}@cnb.cool/Seeridia/Chemistry-Note-File.git pdf-download
+        
+        # 检查下载结果
+        echo "Downloaded PDFs:"
+        find pdf-download -name "*.pdf" | wc -l
+        find pdf-download -name "*.pdf" | head -10
 
-    # 7. 压缩结果
+    # 5. 压缩为 ZIP
     - name: Create archive
       if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        cd output
-        zip -r ../documents-$(date +%Y%m%d-%H%M%S).zip .
+        cd pdf-download
+        zip -r ../chemistry-notes-pdf.zip . -x "*.git*" -x "*.zip"
         cd ..
-        ls -lh *.zip
+        ls -lh chemistry-notes-pdf.zip
 
-    # 8. 安装 rclone
+    # 6. 安装 rclone
     - name: Install rclone
       if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         curl https://rclone.org/install.sh | sudo bash
 
-    # 9. 配置 rclone（123云盘 WebDAV）
+    # 7. 配置 rclone（密码加密）
     - name: Configure rclone
       if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         mkdir -p ~/.config/rclone
+        OBSCURED_PASS=$(rclone obscure "${{ secrets.WEBDAV_PASS }}")
         cat > ~/.config/rclone/rclone.conf << EOF
         [123pan]
         type = webdav
         url = ${{ secrets.WEBDAV_URL }}
         vendor = other
         user = ${{ secrets.WEBDAV_USER }}
-        pass = ${{ secrets.WEBDAV_PASS }}
+        pass = $OBSCURED_PASS
         EOF
 
-    # 10. 清理旧文件并上传新文件到 123云盘
+    # 8. 清理旧文件并上传新 PDF 到 123云盘
     - name: Clean and Upload to 123Pan
       if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        REMOTE_PATH="github-converts/${{ github.event.repository.name }}"
-        ZIP_FILE=$(ls *.zip | head -1)
+        REMOTE_PATH="github-converts/Chemistry-Note-PDFs"
+        ZIP_FILE="chemistry-notes-pdf.zip"
         
         echo "Remote path: $REMOTE_PATH"
-        echo "Uploading: $ZIP_FILE"
         
-        # 创建远程目录（如果不存在）
+        # 创建远程目录
         rclone mkdir "123pan:/$REMOTE_PATH" || true
         
-        # 删除该目录下的所有旧文件（保留空目录）
+        # 删除旧文件
         echo "Cleaning old files..."
         rclone delete "123pan:/$REMOTE_PATH/" --progress || echo "Nothing to delete"
         
-        # 上传新 ZIP 文件
+        # 上传新文件
         echo "Uploading new archive..."
         rclone copy "$ZIP_FILE" "123pan:/$REMOTE_PATH/" --progress
         
-        # 验证上传
+        # 验证
         echo "Files on 123Pan:"
         rclone ls "123pan:/$REMOTE_PATH/"
+        echo "Backup completed!"
 
-    # 11. 可选：上传结果保存到 Fork 的 Releases（作为备份）
+    # 9. 可选：创建 Release 备份（GitHub 侧）
     - name: Create Release
       if: (steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch') && github.event_name != 'push'
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: auto-build-${{ github.run_number }}
-        name: Auto Build $(date +%Y-%m-%d)
-        files: "*.zip"
+        tag_name: pdf-backup-${{ github.run_number }}
+        name: PDF Backup $(date +%Y-%m-%d)
+        files: "chemistry-notes-pdf.zip"
         body: |
-          Automated build from upstream sync
-          Commit: ${{ github.sha }}
+          Automated PDF backup from CNB
+          Source: https://cnb.cool/Seeridia/Chemistry-Note-File
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

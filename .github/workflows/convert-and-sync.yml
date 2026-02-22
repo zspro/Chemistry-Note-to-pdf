@@ -1,94 +1,37 @@
-name: Auto Sync Upstream & Backup PDF to 123Pan
+name: Sync CNB PDF to 123Pan
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # 每6小时检查一次
+    - cron: '0 */6 * * *'  # 每6小时检查
   workflow_dispatch:       # 手动触发
-  push:
-    branches: [main, master]
 
 jobs:
-  sync-and-backup:
+  download-and-backup:
     runs-on: ubuntu-latest
     
     steps:
-    # 1. 检出你的 Fork
-    - name: Checkout your fork
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-    # 2. 配置 Git
-    - name: Configure Git
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-    # 3. 同步上游代码（保留代码最新）
-    - name: Sync with upstream
-      id: sync
-      run: |
-        git remote add upstream ${{ secrets.UPSTREAM_URL }} 2>/dev/null || true
-        git fetch upstream
-        
-        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-        echo "Current branch: $CURRENT_BRANCH"
-        echo "branch=$CURRENT_BRANCH" >> $GITHUB_OUTPUT
-        
-        UPSTREAM_SHA=$(git rev-parse upstream/$CURRENT_BRANCH)
-        LOCAL_SHA=$(git rev-parse origin/$CURRENT_BRANCH)
-        
-        if [ "$UPSTREAM_SHA" = "$LOCAL_SHA" ]; then
-          echo "No updates from upstream."
-          echo "has_update=false" >> $GITHUB_OUTPUT
-        else
-          echo "Upstream has new commits."
-          echo "has_update=true" >> $GITHUB_OUTPUT
-          git merge upstream/$CURRENT_BRANCH --no-edit --allow-unrelated-histories || {
-            git reset --hard origin/$CURRENT_BRANCH
-            git rebase upstream/$CURRENT_BRANCH || exit 1
-          }
-          git push origin $CURRENT_BRANCH
-        fi
-
-    # 4. 从 CNB 下载原仓库已生成好的 PDF（关键改动：替换 Pandoc 转换）
+    # 1. 直接从 CNB 克隆 PDF 仓库（公开仓库无需 token）
     - name: Download PDFs from CNB
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        mkdir -p pdf-download
-        
-        # 方式1：直接下载 ZIP（推荐，无需 token，如果公开）
-        curl -L "https://cnb.cool/Seeridia/Chemistry-Note-File/-/archive/main.zip" -o pdfs.zip && \
-        unzip -q pdfs.zip -d pdf-download && \
-        mv pdf-download/Chemistry-Note-File-main/* pdf-download/ 2>/dev/null || true
-        
-        # 如果上述方式失败（私有仓库），使用 git clone（需要 CNB_TOKEN）
-        # git clone --depth 1 https://cnb:${{ secrets.CNB_TOKEN }}@cnb.cool/Seeridia/Chemistry-Note-File.git pdf-download
-        
-        # 检查下载结果
-        echo "Downloaded PDFs:"
-        find pdf-download -name "*.pdf" | wc -l
-        find pdf-download -name "*.pdf" | head -10
+        git clone --depth 1 https://cnb.cool/Seeridia/Chemistry-Note-File.git pdf-source
+        echo "Downloaded files:"
+        ls -la pdf-source/
+        find pdf-source -name "*.pdf" | wc -l
 
-    # 5. 压缩为 ZIP
+    # 2. 压缩（排除 .git 目录）
     - name: Create archive
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        cd pdf-download
-        zip -r ../chemistry-notes-pdf.zip . -x "*.git*" -x "*.zip"
+        cd pdf-source
+        zip -r ../chemistry-notes-pdf.zip . -x "*.git*" -x "*.md"
         cd ..
         ls -lh chemistry-notes-pdf.zip
 
-    # 6. 安装 rclone
+    # 3. 安装 rclone
     - name: Install rclone
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
-      run: |
-        curl https://rclone.org/install.sh | sudo bash
+      run: curl https://rclone.org/install.sh | sudo bash
 
-    # 7. 配置 rclone（密码加密）
+    # 4. 配置 123 云盘
     - name: Configure rclone
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         mkdir -p ~/.config/rclone
         OBSCURED_PASS=$(rclone obscure "${{ secrets.WEBDAV_PASS }}")
@@ -101,41 +44,11 @@ jobs:
         pass = $OBSCURED_PASS
         EOF
 
-    # 8. 清理旧文件并上传新 PDF 到 123云盘
-    - name: Clean and Upload to 123Pan
-      if: steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch'
+    # 5. 上传到 123 云盘（清理旧文件）
+    - name: Upload to 123Pan
       run: |
-        REMOTE_PATH="github-converts/Chemistry-Note-PDFs"
-        ZIP_FILE="chemistry-notes-pdf.zip"
-        
-        echo "Remote path: $REMOTE_PATH"
-        
-        # 创建远程目录
-        rclone mkdir "123pan:/$REMOTE_PATH" || true
-        
-        # 删除旧文件
-        echo "Cleaning old files..."
-        rclone delete "123pan:/$REMOTE_PATH/" --progress || echo "Nothing to delete"
-        
-        # 上传新文件
-        echo "Uploading new archive..."
-        rclone copy "$ZIP_FILE" "123pan:/$REMOTE_PATH/" --progress
-        
-        # 验证
-        echo "Files on 123Pan:"
-        rclone ls "123pan:/$REMOTE_PATH/"
-        echo "Backup completed!"
-
-    # 9. 可选：创建 Release 备份（GitHub 侧）
-    - name: Create Release
-      if: (steps.sync.outputs.has_update == 'true' || github.event_name == 'workflow_dispatch') && github.event_name != 'push'
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: pdf-backup-${{ github.run_number }}
-        name: PDF Backup $(date +%Y-%m-%d)
-        files: "chemistry-notes-pdf.zip"
-        body: |
-          Automated PDF backup from CNB
-          Source: https://cnb.cool/Seeridia/Chemistry-Note-File
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        rclone mkdir "123pan:/Chemistry-Notes" || true
+        rclone delete "123pan:/Chemistry-Notes/" || true
+        rclone copy "chemistry-notes-pdf.zip" "123pan:/Chemistry-Notes/" --progress
+        echo "Upload completed!"
+        rclone ls "123pan:/Chemistry-Notes/"

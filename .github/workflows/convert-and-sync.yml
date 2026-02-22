@@ -1,6 +1,6 @@
 name: Sync CNB PDF to 123Pan
 
-于:
+on:
   schedule:
     - cron: '0 */6 * * *'  # 每6小时检查
   workflow_dispatch:       # 手动触发

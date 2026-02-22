@@ -1,6 +1,6 @@
 name: Sync CNB PDF to 123Pan
 
-on:
+于:
   schedule:
     - cron: '0 */6 * * *'  # 每6小时检查
   workflow_dispatch:       # 手动触发
@@ -51,22 +51,17 @@ jobs:
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         VERSIONED_NAME="chemistry-notes-${TIMESTAMP}.zip"
         
-        echo "Step 1: Uploading versioned file..."
-        rclone copy "chemistry-notes-pdf.zip" "$REMOTE_DIR/$VERSIONED_NAME" --progress
-        
-        # 验证上传成功
-        if ! rclone ls "$REMOTE_DIR/$VERSIONED_NAME" 2>/dev/null | grep -q "$VERSIONED_NAME"; then
+        echo "Step 1: Uploading $VERSIONED_NAME..."
+        if ! rclone copy "chemistry-notes-pdf.zip" "$REMOTE_DIR/$VERSIONED_NAME" --progress; then
           echo "❌ Upload failed!"
           exit 1
         fi
         
         echo "Step 2: Updating latest link..."
-        # 删除旧的 latest，复制新的
         rclone delete "$REMOTE_DIR/chemistry-notes-latest.zip" 2>/dev/null || true
         rclone copy "$REMOTE_DIR/$VERSIONED_NAME" "$REMOTE_DIR/chemistry-notes-latest.zip"
         
         echo "Step 3: Cleaning old versions (keep last 2)..."
-        # 获取所有版本文件（排除 latest），按时间排序，删除旧的
         rclone ls "$REMOTE_DIR" 2>/dev/null | \
           grep "chemistry-notes-.*\.zip" | \
           grep -v "latest" | \

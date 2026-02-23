@@ -2,76 +2,119 @@ name: Sync CNB PDF to 123Pan (Atomic)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # 每6小时检查
-  workflow_dispatch:       # 手动触发
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+env:
+  RCLONE_TRANSFERS: 4
+  RCLONE_CHECKERS: 8
+  RETRY_COUNT: 3
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     
     steps:
-    # 1. 从 CNB 下载最新 PDF
-    - name: Download from CNB
-      run: |
-        git clone --depth 1 https://cnb.cool/Seeridia/Chemistry-Note-File.git pdf-source
-        echo "Downloaded:"
-        du -sh pdf-source/
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        repository: Seeridia/Chemistry-Note-File
+        path: pdf-source
+        depth: 1
+        filter: blob:none
 
-    # 2. 压缩为单个 ZIP（排除 git 和 markdown）
-    - name: Create archive
+    - name: Verify and archive
+      id: archive
       run: |
         cd pdf-source
-        zip -r ../chemistry-notes-pdf.zip . -x "*.git*" -x "*.md"
+        
+        if [ ! "$(find . -name '*.pdf' -type f | head -1)" ]; then
+          echo "::error::No PDF files found!"
+          exit 1
+        fi
+        
+        zip -r ../chemistry-notes-pdf.zip . -x "*.git*" -x "*.md" -x "*.github*"
         cd ..
+        
+        sha256sum chemistry-notes-pdf.zip > checksum.txt
+        echo "size=$(stat -c%s chemistry-notes-pdf.zip)" >> $GITHUB_OUTPUT
+        echo "hash=$(sha256sum chemistry-notes-pdf.zip | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+        
         ls -lh chemistry-notes-pdf.zip
 
-    # 3. 安装 rclone
-    - name: Install rclone
-      run: curl https://rclone.org/install.sh | sudo bash
-
-    # 4. 配置 123 云盘（密码混淆加密）
-    - name: Configure rclone
+    - name: Setup rclone
       run: |
+        curl https://rclone.org/install.sh | sudo bash
         mkdir -p ~/.config/rclone
-        OBSCURED_PASS=$(rclone obscure "${{ secrets.WEBDAV_PASS }}")
-        cat > ~/.config/rclone/rclone.conf << EOF
+        
+        cat > ~/.config/rclone/rclone.conf << 'EOF'
         [123pan]
         type = webdav
-        url = ${{ secrets.WEBDAV_URL }}
+        url = ${WEBDAV_URL}
         vendor = other
-        user = ${{ secrets.WEBDAV_USER }}
-        pass = $OBSCURED_PASS
+        user = ${WEBDAV_USER}
+        pass = ${WEBDAV_PASS_OBSCURED}
         EOF
+        
+        rclone about 123pan: > /dev/null && echo "Rclone configured successfully"
 
-    # 5. 上传（时间戳版本 + 原子 MOVE 替换 latest）
-    - name: Upload with atomic replace
+      env:
+        WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+        WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+        WEBDAV_PASS_OBSCURED: ${{ secrets.WEBDAV_PASS_OBSCURED }}
+
+    - name: Atomic upload with verification
       run: |
         REMOTE="123pan:/Chemistry-Notes"
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         VERSIONED="notes-${TIMESTAMP}.zip"
+        TEMP_FILE="uploading-${TIMESTAMP}.zip"
         
-        echo "Step 1: Uploading timestamped version..."
-        rclone copy chemistry-notes-pdf.zip "$REMOTE/$VERSIONED" --progress
+        echo "::group::Step 1: Upload to temporary location"
+        rclone copy chemistry-notes-pdf.zip "$REMOTE/$TEMP_FILE" \
+          --checksum \
+          --progress \
+          --retries $RETRY_COUNT
         
-        echo "Step 2: Atomic replace latest.zip using MOVE..."
-        # 先删除旧的 latest（MOVE 要求目标不存在或覆盖）
-        rclone delete "$REMOTE/latest.zip" 2>/dev/null || true
+        echo "::endgroup::"
         
-        # 使用 MOVE (201 支持) 原子重命名，无空窗期
-        rclone moveto "$REMOTE/$VERSIONED" "$REMOTE/latest.zip"
+        echo "::group::Step 2: Atomic rename to versioned"
+        REMOTE_HASH=$(rclone hashsum sha256 "$REMOTE/$TEMP_FILE" 2>/dev/null | cut -d' ' -f1)
+        LOCAL_HASH="${{ steps.archive.outputs.hash }}"
         
-        echo "Step 3: Cleaning old versions (keep last 2)..."
-        # 保留最近 2 个时间戳版本（不包括 latest）
-        rclone ls "$REMOTE" 2>/dev/null | \
-          grep "notes-.*\.zip" | \
-          grep -v "latest" | \
-          sort -k2 | \
-          head -n -2 | \
-          awk '{print $2}' | \
-        while read oldfile; do
-          echo "Removing: $oldfile"
-          rclone delete "$REMOTE/$oldfile" 2>/dev/null || true
-        done
+        if [ "$REMOTE_HASH" != "$LOCAL_HASH" ]; then
+          echo "::error::Checksum mismatch! Remote: $REMOTE_HASH, Local: $LOCAL_HASH"
+          rclone delete "$REMOTE/$TEMP_FILE"
+          exit 1
+        fi
         
-        echo "✅ Done! Current files:"
-        rclone ls "$REMOTE/"
+        rclone moveto "$REMOTE/$TEMP_FILE" "$REMOTE/$VERSIONED"
+        echo "::endgroup::"
+        
+        echo "::group::Step 3: Atomic replace latest"
+        rclone copy "$REMOTE/$VERSIONED" "$REMOTE/latest.zip.tmp"
+        rclone moveto "$REMOTE/latest.zip.tmp" "$REMOTE/latest.zip"
+        echo "::endgroup::"
+        
+        echo "::group::Step 4: Smart cleanup (keep last 3)"
+        mapfile -t files < <(rclone lsjson "$REMOTE" 2>/dev/null | \
+          jq -r '.[] | select(.Name | test("^notes-\\d{8}-\\d{6}\\.zip$")) | .Name' | \
+          sort -r)
+        
+        total=${#files[@]}
+        if [ $total -gt 3 ]; then
+          for ((i=3; i<total; i++)); do
+            echo "Removing old version: ${files[$i]}"
+            rclone delete "$REMOTE/${files[$i]}"
+          done
+        else
+          echo "Only $total version(s) found, skipping cleanup"
+        fi
+        
+        echo "::endgroup::"
+        
+        echo "::notice::Backup completed: $VERSIONED ($(numfmt --to=iec ${{ steps.archive.outputs.size }}))"
+
+    - name: Cleanup workspace
+      if: always()
+      run: rm -f chemistry-notes-pdf.zip checksum.txt

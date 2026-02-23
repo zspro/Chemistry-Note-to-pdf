@@ -42,9 +42,20 @@ jobs:
 
     - name: Setup rclone
       run: |
-        curl https://rclone.org/install.sh | sudo bash
-        mkdir -p ~/.config/rclone
+        # 直接下载二进制，避开 install.sh 的 mandb 卡顿
+        curl -sL -o rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
+        unzip -q rclone.zip
+        cd rclone-*-linux-amd64
+        sudo cp rclone /usr/local/bin/
+        sudo chmod 755 /usr/local/bin/rclone
+        cd ..
+        rm -rf rclone.zip rclone-*-linux-amd64
         
+        # 验证安装
+        rclone version
+        
+        # 配置
+        mkdir -p ~/.config/rclone
         cat > ~/.config/rclone/rclone.conf << 'EOF'
         [123pan]
         type = webdav
@@ -54,6 +65,7 @@ jobs:
         pass = ${WEBDAV_PASS_OBSCURED}
         EOF
         
+        # 测试连接
         rclone about 123pan: > /dev/null && echo "Rclone configured successfully"
 
       env:

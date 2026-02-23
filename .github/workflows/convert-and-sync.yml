@@ -41,29 +41,29 @@ jobs:
         ls -lh chemistry-notes-pdf.zip
 
     - name: Setup rclone
+      env:
+        WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+        WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+        WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}  # 直接存明文密码即可
       run: |
+        # 下载 rclone
         curl -sL -o rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
         unzip -q rclone.zip
-        cd rclone-*-linux-amd64
-        sudo cp rclone /usr/local/bin/
+        sudo cp rclone-*-linux-amd64/rclone /usr/local/bin/
         sudo chmod 755 /usr/local/bin/rclone
-        cd ..
         rm -rf rclone.zip rclone-*-linux-amd64
         
         rclone version
         
-        mkdir -p ~/.config/rclone
-        OBSCURED_PASS=$(rclone obscure "${{ secrets.WEBDAV_PASS }}")
+        # 关键：使用 config create 自动处理密码混淆，无需手动 obscure
+        rclone config create 123pan webdav \
+          url="$WEBDAV_URL" \
+          vendor=other \
+          user="$WEBDAV_USER" \
+          pass="$WEBDAV_PASS" \
+          --non-interactive
         
-        cat > ~/.config/rclone/rclone.conf << EOF
-[123pan]
-type = webdav
-url = ${{ secrets.WEBDAV_URL }}
-vendor = other
-user = ${{ secrets.WEBDAV_USER }}
-pass = $OBSCURED_PASS
-EOF
-        
+        # 验证
         rclone about 123pan: > /dev/null && echo "Rclone configured successfully"
 
     - name: Atomic upload with verification

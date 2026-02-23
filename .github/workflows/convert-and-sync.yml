@@ -15,13 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout source
-      uses: actions/checkout@v4
-      with:
-        repository: Seeridia/Chemistry-Note-File
-        path: pdf-source
-        depth: 1
-        filter: blob:none
+    - name: Download from CNB
+      run: |
+        git clone --depth 1 https://cnb.cool/Seeridia/Chemistry-Note-File.git pdf-source
+        echo "Downloaded:"
+        du -sh pdf-source/
 
     - name: Verify and archive
       id: archive

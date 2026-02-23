@@ -1,4 +1,4 @@
-name: Sync CNB PDF to 123Pan
+name: Sync CNB PDF to 123Pan (Atomic)
 
 on:
   schedule:
@@ -6,19 +6,18 @@ on:
   workflow_dispatch:       # 手动触发
 
 jobs:
-  download-and-backup:
+  backup:
     runs-on: ubuntu-latest
     
     steps:
-    # 1. 直接从 CNB 克隆 PDF 仓库（公开仓库无需 token）
-    - name: Download PDFs from CNB
+    # 1. 从 CNB 下载最新 PDF
+    - name: Download from CNB
       run: |
         git clone --depth 1 https://cnb.cool/Seeridia/Chemistry-Note-File.git pdf-source
-        echo "Downloaded files:"
-        ls -la pdf-source/
-        find pdf-source -name "*.pdf" | wc -l
+        echo "Downloaded:"
+        du -sh pdf-source/
 
-    # 2. 压缩（排除 .git 目录）
+    # 2. 压缩为单个 ZIP（排除 git 和 markdown）
     - name: Create archive
       run: |
         cd pdf-source
@@ -30,7 +29,7 @@ jobs:
     - name: Install rclone
       run: curl https://rclone.org/install.sh | sudo bash
 
-    # 4. 配置 123 云盘
+    # 4. 配置 123 云盘（密码混淆加密）
     - name: Configure rclone
       run: |
         mkdir -p ~/.config/rclone
@@ -44,35 +43,35 @@ jobs:
         pass = $OBSCURED_PASS
         EOF
 
-    # 5. 上传并管理版本（保留最近2个，永不覆盖）
-    - name: Upload to 123Pan (Versioned)
+    # 5. 上传（时间戳版本 + 原子 MOVE 替换 latest）
+    - name: Upload with atomic replace
       run: |
-        REMOTE_DIR="123pan:/Chemistry-Notes"
+        REMOTE="123pan:/Chemistry-Notes"
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        VERSIONED_NAME="chemistry-notes-${TIMESTAMP}.zip"
+        VERSIONED="notes-${TIMESTAMP}.zip"
         
-        echo "Step 1: Uploading $VERSIONED_NAME..."
-        if ! rclone copy "chemistry-notes-pdf.zip" "$REMOTE_DIR/$VERSIONED_NAME" --progress; then
-          echo "❌ Upload failed!"
-          exit 1
-        fi
+        echo "Step 1: Uploading timestamped version..."
+        rclone copy chemistry-notes-pdf.zip "$REMOTE/$VERSIONED" --progress
         
-        echo "Step 2: Updating latest link..."
-        rclone delete "$REMOTE_DIR/chemistry-notes-latest.zip" 2>/dev/null || true
-        rclone copy "$REMOTE_DIR/$VERSIONED_NAME" "$REMOTE_DIR/chemistry-notes-latest.zip"
+        echo "Step 2: Atomic replace latest.zip using MOVE..."
+        # 先删除旧的 latest（MOVE 要求目标不存在或覆盖）
+        rclone delete "$REMOTE/latest.zip" 2>/dev/null || true
+        
+        # 使用 MOVE (201 支持) 原子重命名，无空窗期
+        rclone moveto "$REMOTE/$VERSIONED" "$REMOTE/latest.zip"
         
         echo "Step 3: Cleaning old versions (keep last 2)..."
-        rclone ls "$REMOTE_DIR" 2>/dev/null | \
-          grep "chemistry-notes-.*\.zip" | \
+        # 保留最近 2 个时间戳版本（不包括 latest）
+        rclone ls "$REMOTE" 2>/dev/null | \
+          grep "notes-.*\.zip" | \
           grep -v "latest" | \
           sort -k2 | \
           head -n -2 | \
           awk '{print $2}' | \
         while read oldfile; do
-          echo "Deleting old version: $oldfile"
-          rclone delete "$REMOTE_DIR/$oldfile" 2>/dev/null || true
+          echo "Removing: $oldfile"
+          rclone delete "$REMOTE/$oldfile" 2>/dev/null || true
         done
         
-        echo "✅ Upload completed!"
-        echo "Files on 123Pan:"
-        rclone ls "$REMOTE_DIR/"
+        echo "✅ Done! Current files:"
+        rclone ls "$REMOTE/"

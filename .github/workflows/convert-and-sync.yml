@@ -42,7 +42,6 @@ jobs:
 
     - name: Setup rclone
       run: |
-        # 直接下载二进制，避开 install.sh 的 mandb 卡顿
         curl -sL -o rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
         unzip -q rclone.zip
         cd rclone-*-linux-amd64
@@ -51,27 +50,21 @@ jobs:
         cd ..
         rm -rf rclone.zip rclone-*-linux-amd64
         
-        # 验证安装
         rclone version
         
-        # 配置
         mkdir -p ~/.config/rclone
-        cat > ~/.config/rclone/rclone.conf << 'EOF'
-        [123pan]
-        type = webdav
-        url = ${WEBDAV_URL}
-        vendor = other
-        user = ${WEBDAV_USER}
-        pass = ${WEBDAV_PASS_OBSCURED}
-        EOF
+        OBSCURED_PASS=$(rclone obscure "${{ secrets.WEBDAV_PASS }}")
         
-        # 测试连接
+        cat > ~/.config/rclone/rclone.conf << EOF
+[123pan]
+type = webdav
+url = ${{ secrets.WEBDAV_URL }}
+vendor = other
+user = ${{ secrets.WEBDAV_USER }}
+pass = $OBSCURED_PASS
+EOF
+        
         rclone about 123pan: > /dev/null && echo "Rclone configured successfully"
-
-      env:
-        WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-        WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-        WEBDAV_PASS_OBSCURED: ${{ secrets.WEBDAV_PASS_OBSCURED }}
 
     - name: Atomic upload with verification
       run: |
